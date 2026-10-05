@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Log in | RepVault{% endblock %}
+
+{% block body %}
+<div class="auth-wrap">
+    <div class="brand auth-brand">
+        <div class="brand-logo">🏋️</div>
+        <div>
+            <h1 class="brand-name">Rep<span>Vault</span></h1>
+            <div class="brand-tag">Log it. Lift it. Keep your records.</div>
+        </div>
+    </div>
+
+    <div class="container narrow">
+        <h1>Welcome back</h1>
+        <p class="note">Log in to see your workouts.</p>
+
+        {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+        <form method="POST">
+            <label>Username</label>
+            <input type="text" name="username" value="{{ username }}"
+                   autocomplete="username" required autofocus>
+
+            <label>Password</label>
+            <input type="password" name="password" autocomplete="current-password" required>
+
+            <div class="form-buttons">
+                <button class="btn btn-block" type="submit">Log in</button>
+            </div>
+        </form>
+
+        <p class="auth-alt">New here? <a href="{{ url_for('signup') }}">Create an account</a></p>
+    </div>
+</div>
+{% endblock %}

@@ -1,18 +1,72 @@
 import os
+import re
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from functools import wraps
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from flask import Flask, abort, redirect, render_template, request, url_for
+from flask import Flask, abort, redirect, render_template, request, session, url_for
+from pymongo.errors import DuplicateKeyError
+from werkzeug.security import check_password_hash, generate_password_hash
 
-from db import check_connection, records, workouts
+from db import check_connection, records, users, workouts
 
+# CSS lives in public/css/style.css (served directly on Vercel)
 app = Flask(__name__, static_folder="public", static_url_path="")
+
+# ------------------------------------------------------------ security setup
+ON_VERCEL = bool(os.environ.get("VERCEL"))
+
+secret = os.environ.get("SECRET_KEY")
+if not secret:
+    if ON_VERCEL:
+        # Never fall back to a known key in production: anyone could forge logins.
+        raise RuntimeError("SECRET_KEY environment variable is not set.")
+    secret = "dev-only-secret-change-me"   # local development only
+
+app.secret_key = secret
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=ON_VERCEL,       # HTTPS-only cookie when deployed
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+)
 
 MAX_DAYS = 90
 MUSCLES = ["Chest", "Back", "Shoulders", "Biceps", "Triceps", "Legs", "Core"]
 NUDGE_AFTER = 4   # warn if a muscle hasn't been trained for this many days
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,30}$")
+
+
+# ------------------------------------------------------------ auth helpers
+def uid():
+    """Id of the logged-in user (as a string)."""
+    return session["user_id"]
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            nxt = request.full_path.rstrip("?") if request.method == "GET" else None
+            return redirect(url_for("login", next=nxt))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def safe_next(target):
+    """Only allow redirects to paths inside this site."""
+    if target and target.startswith("/") and not target.startswith("//") and "\\" not in target:
+        return target
+    return url_for("index")
+
+
+def start_session(user):
+    session.clear()   # drop any old session data
+    session["user_id"] = str(user["_id"])
+    session["username"] = user["username"]
+    session.permanent = True
 
 
 # ---------------------------------------------------------------- helpers
@@ -75,39 +129,42 @@ def commas(n):
 @app.context_processor
 def inject_globals():
     css = os.path.join(app.static_folder, "css", "style.css")
-    version = int(os.path.getmtime(css)) if os.path.exists(css) else 0
+    try:
+        version = int(os.path.getmtime(css))
+    except OSError:
+        version = 0
     return {"css_version": version, "MAX_DAYS": MAX_DAYS, "MUSCLES": MUSCLES}
 
 
 # ------------------------------------------------------ 90-day rule logic
-def kept_dates():
-    return sorted(workouts.distinct("workout_date"), reverse=True)
+def kept_dates(u):
+    return sorted(workouts.distinct("workout_date", {"user_id": u}), reverse=True)
 
 
-def prune_old_days():
-    """Keep only the latest MAX_DAYS distinct dates."""
-    dates = kept_dates()
+def prune_old_days(u):
+    """Keep only this user's latest MAX_DAYS distinct dates."""
+    dates = kept_dates(u)
     if len(dates) > MAX_DAYS:
         cutoff = dates[MAX_DAYS - 1]
-        workouts.delete_many({"workout_date": {"$lt": cutoff}})
+        workouts.delete_many({"user_id": u, "workout_date": {"$lt": cutoff}})
 
 
-def date_allowed(d):
+def date_allowed(u, d):
     """Reject dates so old they'd be deleted immediately."""
-    dates = kept_dates()[:MAX_DAYS]
+    dates = kept_dates(u)[:MAX_DAYS]
     if len(dates) < MAX_DAYS or d in dates:
         return True
     return d > dates[-1]
 
 
 # ------------------------------------------------------------- PR / records
-def compute_prs():
+def compute_prs(u):
     """
-    Returns (prev_by_id, pr_by_date).
+    Returns (prev_by_id, pr_by_date) for one user.
     prev_by_id[_id] = best weight for that exercise on EARLIER dates (or None).
     pr_by_date[date] = number of PRs on that date.
     """
-    rows = list(workouts.find().sort([("workout_date", 1), ("_id", 1)]))
+    rows = list(workouts.find({"user_id": u}).sort([("workout_date", 1), ("_id", 1)]))
     best = {}
     prev_by_id = {}
     pr_by_date = defaultdict(int)
@@ -135,24 +192,26 @@ def compute_prs():
     return prev_by_id, pr_by_date
 
 
-def update_records():
-    """Raise all-time bests. Never lowers a record, so pruning can't erase it."""
+def update_records(u):
+    """Raise this user's all-time bests. Never lowers a record."""
     best = {}
-    cursor = workouts.find({"weight": {"$gt": 0}}).sort(
+    cursor = workouts.find({"user_id": u, "weight": {"$gt": 0}}).sort(
         [("weight", -1), ("reps", -1), ("workout_date", 1)]
     )
     for w in cursor:
         best.setdefault(w["exercise"].lower(), w)
 
     for key, w in best.items():
-        cur = records.find_one({"_id": key})
+        rid = f"{u}:{key}"   # records are per user
+        cur = records.find_one({"_id": rid})
         better = cur is None or w["weight"] > cur["best_weight"] or (
             w["weight"] == cur["best_weight"] and w["reps"] > cur["best_reps"]
         )
         if better:
             records.replace_one(
-                {"_id": key},
+                {"_id": rid},
                 {
+                    "user_id": u,
                     "exercise": w["exercise"],
                     "muscle": w["muscle"],
                     "best_weight": w["weight"],
@@ -164,16 +223,17 @@ def update_records():
 
 
 # ---------------------------------------------------------- stats helpers
-def weekly_summary():
+def weekly_summary(u):
     today = date.today()
     this_start = today - timedelta(days=today.weekday())   # Monday
     last_start = this_start - timedelta(days=7)
     next_start = this_start + timedelta(days=7)
 
     def totals(a, b):
-        rows = list(workouts.find(
-            {"workout_date": {"$gte": a.isoformat(), "$lt": b.isoformat()}}
-        ))
+        rows = list(workouts.find({
+            "user_id": u,
+            "workout_date": {"$gte": a.isoformat(), "$lt": b.isoformat()},
+        }))
         return {
             "days": len({r["workout_date"] for r in rows}),
             "sets": sum(r["sets"] for r in rows),
@@ -183,19 +243,19 @@ def weekly_summary():
     return totals(this_start, next_start), totals(last_start, this_start)
 
 
-def exercise_suggestions():
+def exercise_suggestions(u):
     counts = defaultdict(int)
     names = {}
-    for w in workouts.find({}, {"exercise": 1}):
+    for w in workouts.find({"user_id": u}, {"exercise": 1}):
         k = w["exercise"].lower()
         counts[k] += 1
         names.setdefault(k, w["exercise"])
     return [names[k] for k in sorted(counts, key=lambda k: (-counts[k], k))]
 
 
-def last_performance():
+def last_performance(u):
     out = {}
-    for w in workouts.find().sort([("workout_date", -1), ("_id", -1)]):
+    for w in workouts.find({"user_id": u}).sort([("workout_date", -1), ("_id", -1)]):
         k = w["exercise"].lower()
         if k not in out:
             out[k] = {
@@ -239,12 +299,82 @@ def parse_exercise(get, index=None):
     return data, None
 
 
+# ------------------------------------------------------------- auth routes
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    if "user_id" in session:
+        return redirect(url_for("index"))
+
+    error = None
+    username = ""
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        confirm = request.form.get("confirm", "")
+
+        if not USERNAME_RE.match(username):
+            error = "Username must be 3 to 30 characters: letters, numbers or underscores."
+        elif len(password) < 8:
+            error = "Password must be at least 8 characters."
+        elif len(password) > 128:
+            error = "Password is too long (max 128 characters)."
+        elif password != confirm:
+            error = "The two passwords don't match."
+        else:
+            doc = {
+                "username": username,
+                "username_lower": username.lower(),
+                "password_hash": generate_password_hash(password),
+                "created_at": datetime.now(timezone.utc),
+            }
+            try:
+                result = users.insert_one(doc)
+            except DuplicateKeyError:
+                error = "That username is already taken."
+            else:
+                doc["_id"] = result.inserted_id
+                start_session(doc)
+                return redirect(url_for("index"))
+
+    return render_template("signup.html", error=error, username=username)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if "user_id" in session:
+        return redirect(url_for("index"))
+
+    error = None
+    username = ""
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+
+        user = users.find_one({"username_lower": username.lower()})
+        if user and check_password_hash(user["password_hash"], password):
+            start_session(user)
+            return redirect(safe_next(request.args.get("next")))
+        # Same message for "no such user" and "wrong password"
+        error = "Incorrect username or password."
+
+    return render_template("login.html", error=error, username=username)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
 # ------------------------------------------------------------------ routes
 @app.route("/")
+@login_required
 def index():
-    update_records()   # also back-fills records from existing workouts
+    u = uid()
+    update_records(u)   # also back-fills records from existing workouts
 
     pipeline = [
+        {"$match": {"user_id": u}},
         {"$group": {
             "_id": "$workout_date",
             "exercises": {"$sum": 1},
@@ -257,12 +387,12 @@ def index():
     for d in days:
         d["muscles"] = ", ".join(sorted(d["muscles"]))
 
-    _, pr_by_date = compute_prs()
+    _, pr_by_date = compute_prs(u)
     for d in days:
         d["prs"] = pr_by_date.get(d["_id"], 0)
 
     # weekly tiles
-    this_w, last_w = weekly_summary()
+    this_w, last_w = weekly_summary(u)
     week_metrics = []
     for icon, label, key, unit, color in [
         ("📅", "Workout days", "days", "", "#3b82f6"),
@@ -278,14 +408,14 @@ def index():
 
     # all-time bests
     week_ago = (date.today() - timedelta(days=7)).isoformat()
-    recs = list(records.find().sort([("best_weight", -1), ("exercise", 1)]))
+    recs = list(records.find({"user_id": u}).sort([("best_weight", -1), ("exercise", 1)]))
     for r in recs:
         r["e1rm"] = est_1rm(r["best_weight"], r["best_reps"])
         r["is_new"] = r["achieved_on"] >= week_ago
 
     # muscle balance
     stats = {}
-    for w in workouts.find({}, {"muscle": 1, "sets": 1, "workout_date": 1}):
+    for w in workouts.find({"user_id": u}, {"muscle": 1, "sets": 1, "workout_date": 1}):
         s = stats.setdefault(w["muscle"], {"sets": 0, "last": ""})
         s["sets"] += w["sets"]
         s["last"] = max(s["last"], w["workout_date"])
@@ -317,12 +447,14 @@ def index():
 
 
 @app.route("/day/<d>")
+@login_required
 def day(d):
     if not valid_date(d):
         return redirect(url_for("index"))
 
-    items = list(workouts.find({"workout_date": d}).sort("_id", 1))
-    prev_by_id, _ = compute_prs()
+    u = uid()
+    items = list(workouts.find({"user_id": u, "workout_date": d}).sort("_id", 1))
+    prev_by_id, _ = compute_prs(u)
 
     total_sets = volume = pr_total = 0
     top_e1rm = 0
@@ -349,7 +481,7 @@ def day(d):
         ("🎯", "Muscles", ", ".join(muscles) or "–", "#06b6d4", True),
     ]
 
-    dates = kept_dates()
+    dates = kept_dates(u)
     pos = dates.index(d) if d in dates else None
     newer = dates[pos - 1] if pos not in (None, 0) else None
     older = dates[pos + 1] if pos is not None and pos + 1 < len(dates) else None
@@ -360,7 +492,9 @@ def day(d):
 
 
 @app.route("/add", methods=["GET", "POST"])
+@login_required
 def add():
+    u = uid()
     error = None
     rows = [{}]
     d = request.args.get("date", "")
@@ -387,30 +521,33 @@ def add():
             error = "Please enter a valid date."
         elif not parsed:
             error = "Add at least one exercise."
-        elif not error and not date_allowed(d):
+        elif not error and not date_allowed(u, d):
             error = (f"That date is older than your latest {MAX_DAYS} workout days, "
                      "so it would be deleted straight away.")
 
         if not error:
             for p in parsed:
                 p["workout_date"] = d
+                p["user_id"] = u
             workouts.insert_many(parsed)
-            update_records()   # records first, then prune
-            prune_old_days()
+            update_records(u)   # records first, then prune
+            prune_old_days(u)
             return redirect(url_for("day", d=d))
 
         rows = parsed or [{}]
 
     return render_template(
         "add.html", date=d, rows=rows, error=error,
-        suggestions=exercise_suggestions(), last_perf=last_performance(),
+        suggestions=exercise_suggestions(u), last_perf=last_performance(u),
     )
 
 
 @app.route("/edit/<workout_id>", methods=["GET", "POST"])
+@login_required
 def edit(workout_id):
+    u = uid()
     oid = to_object_id(workout_id)
-    workout = workouts.find_one({"_id": oid})
+    workout = workouts.find_one({"_id": oid, "user_id": u})   # only your own
     if not workout:
         abort(404)
 
@@ -422,47 +559,51 @@ def edit(workout_id):
         data, error = parse_exercise(request.form.get)
         if not error and not valid_date(d):
             error = "Please enter a valid date."
-        elif not error and not date_allowed(d):
+        elif not error and not date_allowed(u, d):
             error = (f"That date is older than your latest {MAX_DAYS} workout days, "
                      "so it would be deleted straight away.")
 
         if not error:
             data["workout_date"] = d
-            workouts.update_one({"_id": oid}, {"$set": data})
-            update_records()
-            prune_old_days()
+            workouts.update_one({"_id": oid, "user_id": u}, {"$set": data})
+            update_records(u)
+            prune_old_days(u)
             return redirect(url_for("day", d=d))
 
         workout = {**request.form.to_dict(), "workout_date": d}
 
     return render_template(
         "edit.html", w=workout, wid=workout_id, orig_date=orig_date,
-        error=error, suggestions=exercise_suggestions(),
+        error=error, suggestions=exercise_suggestions(u),
     )
 
 
 @app.route("/delete/<workout_id>", methods=["POST"])
+@login_required
 def delete(workout_id):
+    u = uid()
     oid = to_object_id(workout_id)
-    w = workouts.find_one({"_id": oid})
+    w = workouts.find_one({"_id": oid, "user_id": u})
     if w:
-        workouts.delete_one({"_id": oid})
-        if workouts.count_documents({"workout_date": w["workout_date"]}) > 0:
+        workouts.delete_one({"_id": oid, "user_id": u})
+        if workouts.count_documents({"user_id": u, "workout_date": w["workout_date"]}) > 0:
             return redirect(url_for("day", d=w["workout_date"]))
     return redirect(url_for("index"))
 
 
 @app.route("/delete-day", methods=["POST"])
+@login_required
 def delete_day():
     d = request.form.get("date", "")
     if valid_date(d):
-        workouts.delete_many({"workout_date": d})
+        workouts.delete_many({"user_id": uid(), "workout_date": d})
     return redirect(url_for("index"))
 
 
 @app.route("/delete-record", methods=["POST"])
+@login_required
 def delete_record():
-    records.delete_one({"_id": request.form.get("key", "")})
+    records.delete_one({"_id": request.form.get("key", ""), "user_id": uid()})
     return redirect(url_for("index"))
 
 
