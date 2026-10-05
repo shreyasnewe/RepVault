@@ -1,9 +1,18 @@
 import os
 from pymongo import MongoClient
 
-MONGO_URI = os.environ.get("mongodb+srv://Vercel-Admin-repvault:rKqv7orIWCkTMEfa@repvault.ni5wdcj.mongodb.net/?retryWrites=true&w=majority", "mongodb://localhost:27017")
+# Connection string comes from the environment (Vercel Environment Variables)
+MONGO_URI = os.environ.get("MONGODB_URI")
+
+if not MONGO_URI:
+    if os.environ.get("VERCEL"):
+        # On Vercel, never fall back to localhost: it can't work there
+        raise RuntimeError("MONGODB_URI is not set for this Vercel environment.")
+    MONGO_URI = "mongodb://localhost:27017"   # local development only
+
 DB_NAME = "repvault"
 
+# Created once per process so connections are reused between requests
 client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, maxIdleTimeMS=5000)
 db = client[DB_NAME]
 
