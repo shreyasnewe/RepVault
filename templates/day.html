@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Workout - {{ date }} | RepVault{% endblock %}
+
+{% block body %}
+<div class="layout two">
+
+    <aside class="sidebar">
+        <h2>Day summary</h2>
+        <div class="note" style="margin-top:0">{{ date|pretty_date('%a, %d %b %Y') }}</div>
+
+        {% if items %}
+        <div class="tile-grid">
+            {% for icon, label, value, color, small in tiles %}
+            <div class="week-tile{{ ' wide' if small }}" style="--tile-color: {{ color }}">
+                <div class="icon">{{ icon }}</div>
+                <div class="label">{{ label }}</div>
+                <div class="value{{ ' sm' if small }}">{{ value }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="note">No stats yet.</p>
+        {% endif %}
+    </aside>
+
+    <div class="container">
+        <div class="page-head">
+            <h1>{{ date|pretty_date('%A, %d %B %Y') }}</h1>
+        </div>
+
+        <div class="top-actions">
+            <a class="btn" href="{{ url_for('add', date=date) }}">+ Add exercises</a>
+            <a class="btn btn-secondary" href="{{ url_for('index') }}">All days</a>
+            {% if items %}
+            <form method="POST" action="{{ url_for('delete_day') }}"
+                  onsubmit="return confirm('Delete the ENTIRE workout for this day?')">
+                <input type="hidden" name="date" value="{{ date }}">
+                <button class="btn btn-delete" type="submit">Delete whole day</button>
+            </form>
+            {% endif %}
+        </div>
+
+        <h2 class="section-title">Exercises</h2>
+        {% if not items %}<p class="empty">No workout logged for this day.</p>{% endif %}
+
+        <div class="ex-grid">
+            {% for w in items %}
+            <div class="ex-card {{ 'is-pr' if w.is_pr }}">
+                <div class="ex-top">
+                    <div>
+                        <div class="ex-name">{{ w.exercise }}</div>
+                        <span class="muscle-pill">{{ w.muscle }}</span>
+                    </div>
+                    {% if w.is_pr %}<span class="badge-pr">🏆 PR</span>{% endif %}
+                </div>
+
+                <div class="ex-stats">
+                    <div class="mini-stat"><strong>{{ w.sets }}</strong><span>Sets</span></div>
+                    <div class="mini-stat"><strong>{{ w.reps }}</strong><span>Reps</span></div>
+                    <div class="mini-stat"><strong>{{ w.weight|num(2) }}</strong><span>kg</span></div>
+                </div>
+
+                {% if w.is_pr %}
+                <div class="note" style="margin:0">Previous best: {{ w.prev|num(2) }} kg</div>
+                {% endif %}
+
+                <div class="ex-foot">
+                    <span class="e1rm">⚡ Est. 1RM: {{ (w.e1rm|num ~ ' kg') if w.e1rm else '–' }}</span>
+                    <div class="actions">
+                        <a class="btn btn-edit" href="{{ url_for('edit', workout_id=w._id|string) }}">Edit</a>
+                        <form method="POST" action="{{ url_for('delete', workout_id=w._id|string) }}"
+                              onsubmit="return confirm('Delete this exercise?')">
+                            <button class="btn btn-delete" type="submit">Delete</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <p class="note">Est. 1RM uses the Epley formula: weight × (1 + reps ÷ 30). Most accurate for sets of 10 reps or fewer.</p>
+
+        <div class="day-nav">
+            {% if older %}<a class="btn btn-secondary" href="{{ url_for('day', d=older) }}">&larr; {{ older|pretty_date('%d %b') }}</a>{% else %}<span></span>{% endif %}
+            {% if newer %}<a class="btn btn-secondary" href="{{ url_for('day', d=newer) }}">{{ newer|pretty_date('%d %b') }} &rarr;</a>{% endif %}
+        </div>
+    </div>
+
+</div>
+{% endblock %}

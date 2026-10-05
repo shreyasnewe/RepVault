@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}RepVault - Workout Tracker{% endblock %}
+
+{% block body %}
+<div class="layout three">
+
+    <!-- LEFT: weekly stats -->
+    <aside class="sidebar">
+        <h2>This week</h2>
+        <div class="note" style="margin-top:0">vs last week · Monday to Sunday</div>
+
+        <div class="week-grid" style="margin-top:14px">
+            {% for m in week_metrics %}
+            <div class="week-tile" style="--tile-color: {{ m.color }}">
+                <div class="icon">{{ m.icon }}</div>
+                <div class="label">{{ m.label }}</div>
+                <div class="value">{{ m.now|commas }}{% if m.unit %} <small>{{ m.unit }}</small>{% endif %}</div>
+                <span class="pill {{ m.cls }}">{{ m.arrow }} {{ m.text }}</span>
+                <div class="last">Last week: {{ m.before|commas }}{% if m.unit %} {{ m.unit }}{% endif %}</div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="sidebar-sep"></div>
+
+        <h2>Overview</h2>
+        <div class="overview">
+            <div><strong>{{ days|length }}/{{ MAX_DAYS }}</strong>Days</div>
+            <div><strong>{{ total_exercises }}</strong>Exercises</div>
+            <div><strong>🏆 {{ total_prs }}</strong>PRs</div>
+        </div>
+    </aside>
+
+    <!-- MIDDLE -->
+    <div class="container">
+
+        <div class="page-head">
+            <div class="brand">
+                <div class="brand-logo">Rv</div>
+                <div>
+                    <h1 class="brand-name">Rep<span>Vault</span></h1>
+                    <div class="brand-tag">Log it. Lift it.</div>
+                </div>
+            </div>
+            <a class="btn" href="{{ url_for('add') }}">+ Log a Workout Day</a>
+        </div>
+
+        <p class="note">
+            Only your latest {{ MAX_DAYS }} workout days are kept ({{ days|length }} used).
+            All-time bests are kept forever.
+        </p>
+
+        {% if chart_data %}
+        <h2 class="section-title">Muscle balance</h2>
+        <div class="balance">
+            <div class="chart-box">
+                <canvas id="muscleChart"
+                        data-labels='{{ chart_labels|tojson|safe }}'
+                        data-values='{{ chart_data|tojson|safe }}'></canvas>
+            </div>
+            <div class="balance-info">
+                <div class="note" style="margin-top:0">Total sets per muscle group across your logged days.</div>
+                <ul>
+                    {% if not nudges %}
+                    <li class="ok">✅ Nice balance. Every muscle group was trained recently.</li>
+                    {% endif %}
+                    {% for n in nudges %}<li class="warn">⚠️ {{ n }}</li>{% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+
+        <h2 class="section-title">Your workout days</h2>
+
+        {% if not days %}
+        <p class="empty">No workouts yet. Log your first day!</p>
+        {% endif %}
+
+        <div class="day-grid">
+            {% for d in days %}
+            <a class="day-card" href="{{ url_for('day', d=d._id) }}">
+                <div class="day-date">{{ d._id|pretty_date('%a, %d %b %Y') }}</div>
+                <div class="day-meta">
+                    {{ d.exercises }} exercise{{ '' if d.exercises == 1 else 's' }} · {{ d.total_sets }} sets
+                </div>
+                <div class="day-muscles">{{ d.muscles }}</div>
+                {% if d.prs > 0 %}
+                <span class="badge-pr">🏆 {{ d.prs }} PR{{ '' if d.prs == 1 else 's' }}</span>
+                {% endif %}
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- RIGHT: all-time bests -->
+    <aside class="sidebar sidebar-right">
+        <h2>🏆 All-time bests</h2>
+        <div class="note" style="margin-top:0">Heaviest weight per exercise. Never deleted by the {{ MAX_DAYS }}-day rule.</div>
+
+        {% if not records %}
+        <p class="note">No records yet. Log a weighted exercise and it will appear here.</p>
+        {% endif %}
+
+        <div class="rec-list">
+            {% for r in records %}
+            <div class="rec">
+                <div class="rec-name">
+                    {{ r.exercise }}{% if r.is_new %}<span class="rec-new">NEW</span>{% endif %}
+                </div>
+                <div class="rec-main">{{ r.best_weight|num(2) }} <small>kg × {{ r.best_reps }}</small></div>
+                <div class="rec-meta">
+                    {{ r.achieved_on|pretty_date }}
+                    {% if r.e1rm %} · <span class="e">1RM ≈ {{ r.e1rm|num }} kg</span>{% endif %}
+                    <span class="muscle-pill">{{ r.muscle }}</span>
+                </div>
+                <form method="POST" action="{{ url_for('delete_record') }}"
+                      onsubmit="return confirm('Remove this record? It will come back if a logged workout still beats it.')">
+                    <input type="hidden" name="key" value="{{ r._id }}">
+                    <button type="submit" title="Remove record">×</button>
+                </form>
+            </div>
+            {% endfor %}
+        </div>
+    </aside>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if chart_data %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+const chartCanvas = document.getElementById('muscleChart');
+const labels = JSON.parse(chartCanvas.dataset.labels || '[]');
+const data = JSON.parse(chartCanvas.dataset.values || '[]');
+
+new Chart(chartCanvas, {
+    type: 'doughnut',
+    data: {
+        labels: labels,
+        datasets: [{
+            data: data,
+            backgroundColor: ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#a855f7', '#06b6d4', '#64748b'],
+            borderWidth: 3,
+            borderColor: '#172033'
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '65%',
+        plugins: { legend: { position: 'bottom', labels: { color: '#e2e8f0' } } }
+    }
+});
+</script>
+{% endif %}
+{% endblock %}

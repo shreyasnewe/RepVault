@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Edit Exercise | RepVault{% endblock %}
+
+{% block body %}
+<div class="container narrow">
+    <h1>Edit Exercise</h1>
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+    <form method="POST">
+        <label>Date</label>
+        <input type="date" name="workout_date" value="{{ w.workout_date }}" required>
+
+        <label>Exercise</label>
+        <input type="text" name="exercise" list="exercise-list" autocomplete="off"
+               value="{{ w.exercise or '' }}" required>
+        <datalist id="exercise-list">
+            {% for s in suggestions %}<option value="{{ s }}"></option>{% endfor %}
+        </datalist>
+
+        <label>Muscle</label>
+        <select name="muscle">
+            {% for m in MUSCLES %}<option value="{{ m }}" {{ 'selected' if w.muscle == m }}>{{ m }}</option>{% endfor %}
+        </select>
+
+        <label>Sets</label>
+        <input type="number" name="sets" min="1" value="{{ w.sets }}" required>
+
+        <label>Reps</label>
+        <input type="number" name="reps" min="1" value="{{ w.reps }}" required>
+
+        <label>Weight (kg)</label>
+        <input type="number" name="weight" step="0.5" min="0" value="{{ w.weight }}" required>
+
+        <div class="form-buttons">
+            <button class="btn" type="submit">Update Exercise</button>
+            <a class="btn btn-secondary" href="{{ url_for('day', d=orig_date) }}">Back</a>
+        </div>
+    </form>
+</div>
+{% endblock %}

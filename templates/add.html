@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Log Workout Day | RepVault{% endblock %}
+
+{% macro row(r) %}
+<div class="exercise-row">
+    <div class="f-ex">
+        <label class="mini">Exercise</label>
+        <input type="text" name="exercise" list="exercise-list" autocomplete="off"
+               value="{{ r.exercise or '' }}" placeholder="e.g. Bench Press">
+    </div>
+    <div>
+        <label class="mini">Muscle</label>
+        <select name="muscle">
+            {% for m in MUSCLES %}<option {{ 'selected' if r.muscle == m }}>{{ m }}</option>{% endfor %}
+        </select>
+    </div>
+    <div>
+        <label class="mini">Sets</label>
+        <input type="number" name="sets" min="1" value="{{ r.sets or '' }}">
+    </div>
+    <div>
+        <label class="mini">Reps</label>
+        <input type="number" name="reps" min="1" value="{{ r.reps or '' }}">
+    </div>
+    <div>
+        <label class="mini">Weight (kg)</label>
+        <input type="number" name="weight" step="0.5" min="0" value="{{ r.weight if r.weight is not none and r.weight != '' else '' }}">
+    </div>
+    <button type="button" class="btn btn-delete remove-row" title="Remove">&times;</button>
+    <div class="hint"></div>
+</div>
+{% endmacro %}
+
+{% block body %}
+<div class="container">
+    <div class="page-head"><h1>Log a Workout Day</h1></div>
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+    <form method="POST">
+        <label>Date</label>
+        <input type="date" name="workout_date" value="{{ date }}" required style="max-width:220px">
+
+        <div id="rows">
+            {% for r in rows %}{{ row(r) }}{% endfor %}
+        </div>
+
+        <template id="row-template">{{ row({}) }}</template>
+
+        <div class="form-buttons">
+            <button type="button" id="add-row" class="btn btn-secondary">+ Add another exercise</button>
+        </div>
+        <div class="form-buttons">
+            <button class="btn" type="submit">Save Workout Day</button>
+            <a class="btn btn-secondary" href="{{ url_for('index') }}">Cancel</a>
+        </div>
+    </form>
+</div>
+
+<div id="exercise-data" data-last-perf='{{ last_perf|tojson|safe }}'></div>
+<datalist id="exercise-list">
+    {% for s in suggestions %}<option value="{{ s }}"></option>{% endfor %}
+</datalist>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const rows = document.getElementById('rows');
+const tpl  = document.getElementById('row-template');
+const lastMap = JSON.parse(document.getElementById('exercise-data').dataset.lastPerf || '{}');
+
+function showHint(row) {
+    const name = row.querySelector('input[name="exercise"]').value.trim().toLowerCase();
+    const hint = row.querySelector('.hint');
+    const l = lastMap[name];
+    if (!l) { hint.textContent = ''; return; }
+
+    let text = 'Last time (' + l.label + '): ' + l.sets + ' sets × ' + l.reps + ' reps';
+    let tip;
+    if (l.weight > 0) {
+        text += ' @ ' + l.weight + ' kg · Best: ' + l.best + ' kg';
+        tip = (l.reps >= 10)
+            ? 'Try ' + (l.weight + 2.5) + ' kg today.'
+            : 'Try ' + (l.reps + 1) + ' reps at ' + l.weight + ' kg today.';
+    } else {
+        tip = 'Try ' + (l.reps + 1) + ' reps today.';
+    }
+    hint.textContent = '💡 ' + text + ' · ' + tip;
+}
+
+document.getElementById('add-row').addEventListener('click', () => {
+    rows.appendChild(tpl.content.cloneNode(true));
+});
+
+rows.addEventListener('click', (e) => {
+    if (e.target.classList.contains('remove-row') && rows.children.length > 1) {
+        e.target.closest('.exercise-row').remove();
+    }
+});
+
+rows.addEventListener('input', (e) => {
+    if (!e.target.matches('input[name="exercise"]')) return;
+    const row = e.target.closest('.exercise-row');
+    const known = lastMap[e.target.value.trim().toLowerCase()];
+    if (known) row.querySelector('select').value = known.muscle;
+    showHint(row);
+});
+
+rows.querySelectorAll('.exercise-row').forEach(showHint);
+</script>
+{% endblock %}
